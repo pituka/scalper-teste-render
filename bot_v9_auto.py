@@ -4,9 +4,15 @@ import math
 from datetime import datetime
 import numpy as np
 import pandas as pd
-import streamlit as st   # <-- TEM DE VIR ANTES DE USAR st
+import streamlit as st
 from binance.client import Client
-from dotenv import load_dotenv
+
+# LER VARIÁVEIS DO RENDER
+api_key = os.getenv("BINANCE_API_KEY")
+api_secret = os.getenv("BINANCE_API_SECRET")
+
+client = Client(api_key, api_secret)
+
 
 
 # inicializar logs
@@ -865,5 +871,6 @@ else:
     col2.metric("📐 RR Médio", f"{rr_medio:.2f}")
     col3.metric("💰 Lucro Acumulado", f"{lucro_total:.2f} USDT")
     col4.metric("📉 Máx. Drawdown", f"{max_dd:.2f} USDT")
+
 
     st.line_chart(df.set_index("Data")["Equity"])
