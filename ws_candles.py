@@ -1,4 +1,4 @@
-from binance.websocket.futures.websocket_client import FuturesWebsocketClient
+from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 import pandas as pd
 
 class CandleStream:
@@ -40,3 +40,4 @@ class CandleStream:
         if symbol not in self.data:
             return None
         return pd.DataFrame(self.data[symbol])
+
