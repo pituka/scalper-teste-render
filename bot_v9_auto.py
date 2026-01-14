@@ -307,7 +307,7 @@ def obter_step_tick(client: Client, symbol: str):
     except Exception as e:
         log_event(symbol, f"Erro ao obter step/tick: {str(e)}", {})
         return 0.001, 0.0001
-:
+        
     try:
         df = st.session_state.ws_candles.get_df(symbol)
         if df is None or len(df) < 20:
@@ -891,5 +891,6 @@ else:
 
 
     st.line_chart(df.set_index("Data")["Equity"])
+
 
 
