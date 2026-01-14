@@ -29,7 +29,6 @@ if "last_scan_time" not in st.session_state:
 # ================================================================
 # 1. CONFIGURAÇÕES GERAIS E CONSTANTES
 # ================================================================
-load_dotenv()
 
 
 st.set_page_config(page_title="Scalper v13.2 - Auto-Scan Fixed (120s)", layout="wide")
@@ -874,3 +873,4 @@ else:
 
 
     st.line_chart(df.set_index("Data")["Equity"])
+
