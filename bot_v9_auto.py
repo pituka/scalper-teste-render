@@ -6,6 +6,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from binance.client import Client
+from ws_candles import CandleStream
+from ws_user import UserStream
+
+
 
 # LER VARIÁVEIS DO RENDER
 api_key = os.getenv("BINANCE_API_KEY")
@@ -18,6 +22,14 @@ client = Client(api_key, api_secret)
 # inicializar logs
 if "logs" not in st.session_state:
     st.session_state.logs = []
+# inicializar WebSocket de candles
+if "ws_candles" not in st.session_state:
+    st.session_state.ws_candles = CandleStream()
+if "ws_user" not in st.session_state:
+    st.session_state.ws_user = UserStream(api_key, api_secret)
+    st.session_state.ws_user.start()
+    
+
 
 # inicializar auto-scan
 if "auto_scan_running" not in st.session_state:
@@ -277,10 +289,8 @@ def detectar_sinal_precisao(df: pd.DataFrame, symbol: str, adx_min: float = 20.0
 # ================================================================
 # 5. UTILITÁRIOS DE PRECISÃO (QTY, PRICE, STEP, TICK, ID)
 # ================================================================
+@st.cache_resource
 def obter_step_tick(client: Client, symbol: str):
-    """
-    FIXED: Removida duplicação de chamada API
-    """
     try:
         info = client.futures_exchange_info()
         step = 0.001
@@ -297,6 +307,36 @@ def obter_step_tick(client: Client, symbol: str):
     except Exception as e:
         log_event(symbol, f"Erro ao obter step/tick: {str(e)}", {})
         return 0.001, 0.0001
+:
+    try:
+        df = st.session_state.ws_candles.get_df(symbol)
+        if df is None or len(df) < 20:
+            return None
+
+        highs = df["high"].tail(20).tolist()
+        lows = df["low"].tail(20).tolist()
+        atr = np.mean([h - l for h, l in zip(highs, lows)])
+
+        topo = max(highs[-10:-2])
+        fundo = min(lows[-10:-2])
+        margem = atr * 0.5
+
+        if lado == "SELL":
+            sl = topo + margem
+        elif lado == "BUY":
+            sl = fundo - margem
+        else:
+            sl = entry
+
+        if abs(sl - entry) < atr * 0.3:
+            sl = entry + atr if lado == "SELL" else entry - atr
+
+        return round(sl, 4)
+
+    except Exception as e:
+        log_event(symbol, f"Erro no SL confluente: {str(e)}", {})
+        return None
+
 
 
 def arredondar_qtd(qty: float, step: float) -> float:
@@ -333,9 +373,12 @@ def log_event(symbol, motivo, dados=None):
 # ================================================================
 def calcular_SL_confluente(client: Client, symbol: str, lado: str, entry: float):
     try:
-        klines = client.futures_klines(symbol=symbol, interval="5m", limit=50)
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
+        df = st.session_state.ws_candles.get_df(symbol)
+        if df is None or len(df) < 20:
+            return None
+
+        highs = df["high"].tail(20).tolist()
+        lows = df["low"].tail(20).tolist()
         atr = np.mean([h - l for h, l in zip(highs, lows)])
 
         topo = max(highs[-10:-2])
@@ -357,6 +400,7 @@ def calcular_SL_confluente(client: Client, symbol: str, lado: str, entry: float)
     except Exception as e:
         log_event(symbol, f"Erro no SL confluente: {str(e)}", {})
         return None
+
 
 
 def abrir_trade_real(client: Client, symbol: str, side: str, leverage: int,
@@ -518,32 +562,14 @@ def abrir_trade_real(client: Client, symbol: str, side: str, leverage: int,
 # ================================================================
 # 7. GESTÃO DE POSIÇÕES, ORDENS E TRADES FECHADOS
 # ================================================================
-def obter_posicoes_ativas(client: Client):
-    try:
-        acc = client.futures_position_information()
-        pos_ativas = {}
-        for p in acc:
-            amt = float(p["positionAmt"])
-            if amt != 0:
-                pos_ativas[p["symbol"].upper()] = p
-        return pos_ativas
-    except Exception as e:
-        st.error(f"Erro ao obter posições: {e}")
-        return {}
+def obter_posicoes_ativas(client):
+    return st.session_state.ws_user.positions
 
 
-def obter_simbolos_com_ordens_abertas(client: Client):
-    try:
-        ordens = client.futures_get_open_orders()
-        symbols = set()
-        for o in ordens:
-            symbol = o.get("symbol") or o.get("s")
-            if symbol:
-                symbols.add(symbol.upper())
-        return symbols
-    except Exception as e:
-        st.error(f"Erro ao obter ordens abertas: {e}")
-        return set()
+
+def obter_simbolos_com_ordens_abertas(client):
+    return set(st.session_state.ws_user.open_orders.keys())
+
 
 
 def cancelar_ordens_universais(client: Client):
@@ -562,20 +588,14 @@ def cancelar_ordens_universais(client: Client):
                 log_event(symbol, f"Erro ao cancelar ordens: {str(e)}", {})
 
 
-def obter_ultimo_trade(client: Client, symbol: str):
-    """
-    Último trade para aproximar Exit e PnL realized.
-    """
-    try:
-        trades = client.futures_account_trades(symbol=symbol, limit=1)
-        if not trades:
-            return None
-        t = trades[0]
-        price = float(t["price"])
-        realized_pnl = float(t.get("realizedPnl", 0.0))
-        return price, realized_pnl
-    except Exception:
-        return None
+def obter_ultimo_trade(client, symbol: str):
+    if symbol in st.session_state.ws_user.last_trade:
+        o = st.session_state.ws_user.last_trade[symbol]
+        price = float(o["L"])  # preço da execução
+        pnl = float(o.get("rp", 0.0))  # realized pnl
+        return price, pnl
+    return None
+
 
 
 def classificar_resultado(lado: str, sl: float, tp: float, exit_price: float) -> str:
@@ -667,6 +687,10 @@ def iniciar_scan(lev_val: int, notional_ui: float, adx_min: float, cooldown_min:
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_API_SECRET")
     client = obter_cliente(api_key, api_secret)
+    # iniciar WebSocket para todos os símbolos
+    for sym in TOP_100_SYMBOLS:
+        st.session_state.ws_candles.start(sym)
+
 
     if not client:
         st.error("Cliente Binance não inicializado. Verifica API KEY e SECRET.")
@@ -699,16 +723,10 @@ def iniciar_scan(lev_val: int, notional_ui: float, adx_min: float, cooldown_min:
         try:
             msg.text(f"🔍 Analisando {sym}")
 
-            k = client.futures_klines(symbol=sym, interval="5m", limit=300)
-            df = pd.DataFrame(
-                k,
-                columns=[
-                    "ot", "open", "high", "low", "close", "vol",
-                    "ct", "qav", "nt", "tbb", "tbq", "i",
-                ],
-            )
+            df = st.session_state.ws_candles.get_df(sym)
+            if df is None or len(df) < 50:
+                continue
 
-            df[["open", "high", "low", "close", "vol"]] = df[["open", "high", "low", "close", "vol"]].astype(float)
 
             sinal = detectar_sinal_precisao(df, symbol=sym, adx_min=adx_min)
             if not sinal:
@@ -873,4 +891,5 @@ else:
 
 
     st.line_chart(df.set_index("Data")["Equity"])
+
 
